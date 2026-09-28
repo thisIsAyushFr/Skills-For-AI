@@ -1,0 +1,26 @@
+{
+    "project": {
+        "project_path": "D:\\Code\\Breakr",
+        "project_types": [
+            "Python"
+        ],
+        "technologies": [
+            "Python"
+        ],
+        "file_count": 16
+    },
+    "summary": {
+        "total_findings": 0,
+        "severity_counts": {
+            "CRITICAL": 0,
+            "HIGH": 0,
+            "MEDIUM": 0,
+            "LOW": 0,
+            "INFO": 0
+        },
+        "agent_counts": {},
+        "correlated_groups": 0
+    },
+    "findings": [],
+    "correlated_groups": []
+}

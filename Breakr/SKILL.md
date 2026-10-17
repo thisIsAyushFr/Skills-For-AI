@@ -50,6 +50,7 @@ Useful options:
 | `--quiet` | Print only the summary (read details from the report) |
 | `--osv` | Check dependencies against live OSV.dev data (needs internet) |
 | `--exclude PATTERN` | Skip paths, repeatable, e.g. `--exclude tests --exclude "legacy/*"` |
+| `--include-ignored` | Also scan files that opt out with a `# breakr: ignore-file` comment |
 | `--agents A,B` | Run only some agents, e.g. `--agents SecretBreaker,SupabaseFirebaseBreaker` |
 | `--min-severity HIGH` | Hide lower severities |
 | `--output-dir DIR` | Where to write reports (default `<skill-dir>/Reports`) |
@@ -71,6 +72,10 @@ Open `Reports/security_report.json` (or the `--output-dir` you chose). Key field
   `file`, `line`, `evidence` (secrets are masked), `explanation`,
   `recommendation`, `cwe`
 - `correlated_groups[]`: lines flagged by more than one check. Start here.
+- `project.ignored_files`: files skipped because of a `breakr: ignore-file`
+  marker. Always tell the user they were not audited. If any of them look like
+  real application code rather than test fixtures, re-run with
+  `--include-ignored`.
 
 ### 3. Verify the findings
 

@@ -29,7 +29,7 @@ Breakr is built for the mistakes that keep showing up in real apps, especially
 apps built quickly with AI help: leaked API keys, routes with no login check,
 Supabase tables without Row Level Security, SQL built from strings, and so on.
 
-**Status:** v1.0.0 · **Requires:** Python 3.11+ · **Dependencies:** none (standard library only)
+**Status:** v1.0.0 · **Requires:** Python 3.11+ (tested on 3.13 and 3.14) · **Dependencies:** none (standard library only) · **License:** MIT
 
 ### The 10 agents
 
@@ -61,19 +61,21 @@ cd Skills-For-AI/Breakr
 python main.py path/to/your-project
 ```
 
-Example output:
+Output from the deliberately vulnerable test project, trimmed:
 
 ```
-[CRITICAL] BRK-001 Supabase service_role key committed to the repository
+[CRITICAL] BRK-003 Supabase service_role key committed to the repository
   Location:   src/lib/supabase.js:2
-  Evidence:   createClient(process.env.SUPABASE_URL, "eyJh************")
-[HIGH] BRK-002 State-changing route without visible authentication
-  Location:   server.js:9
-  Evidence:   POST /api/users -> app.post('/api/users', async (req, res) => {
+  Agent:      SupabaseFirebaseBreaker   Confidence: 0.95   CWE-798
+  Evidence:   export const supabaseAdmin = createClient(process.env.SUPABASE_URL, "eyJh************");
 ...
+========================================
+Audit complete.
 Risk level: CRITICAL
-Report: Breakr/Reports/security_report.json
-Report: Breakr/Reports/security_report.md
+Findings: CRITICAL 5  HIGH 41  MEDIUM 23  LOW 7  INFO 0  (total 76)
+Correlated locations: 4
+Report: .../Breakr/Reports/security_report.json
+Report: .../Breakr/Reports/security_report.md
 ```
 
 ### Use it as a Claude Code skill
@@ -109,6 +111,7 @@ The full workflow is in [`Breakr/SKILL.md`](Breakr/SKILL.md).
 |---|---|
 | `--agents A,B` | Run only these agents (default: picked automatically from the detected stack) |
 | `--exclude PATTERN` | Skip matching files or folders. Can be repeated: `--exclude tests --exclude "legacy/*"` |
+| `--include-ignored` | Also scan files marked `breakr: ignore-file` (see below) |
 | `--format json\|markdown\|both` | Report format (default: `both`) |
 | `--output-dir DIR` | Where reports are written (default: `Breakr/Reports/`) |
 | `--min-severity LEVEL` | Hide findings below `CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `INFO` |
@@ -121,7 +124,13 @@ The full workflow is in [`Breakr/SKILL.md`](Breakr/SKILL.md).
 | `--debug` | Show tracebacks if an agent crashes |
 | `--version` | Print the version |
 
-Exit codes: `0` = success, `1` = error, `2` = the `--fail-on` threshold was reached.
+Exit codes:
+
+- `0`: success
+- `1`: error, such as a missing folder, an unknown agent, invalid arguments, or a report directory that can't be written
+- `2`: the `--fail-on` threshold was reached, and nothing else
+
+If one agent crashes, its error is recorded in the report and the rest of the audit continues.
 
 ### Run it in CI (GitHub Actions)
 
@@ -161,6 +170,7 @@ that were skipped, and lines flagged by more than one agent.
 - **Public routes aren't flagged.** Login, signup, health checks and webhooks are recognised. Webhooks get their own signature check instead.
 - **The `.env` check asks git.** It uses `git check-ignore`, which follows nested `.gitignore` files. A local `.env` that git ignores is treated as the right place for secrets.
 - **Placeholders, version numbers, translation files and minified bundles are skipped.**
+- **Intentional fixtures can opt out.** Put a comment line that is exactly `breakr: ignore-file` (`# breakr: ignore-file`, `// breakr: ignore-file`, ...) in a file's first 2 KB and Breakr skips it. It's listed under `ignored_files` in the report, and `--include-ignored` scans it anyway. Breakr's own vulnerable test fixtures use this, so a self-audit reports 0 findings.
 - **A sanitiser lowers the severity.** If XSS or path findings sit in a file that uses DOMPurify, `secure_filename`, `basename` or similar, the finding is downgraded and you're asked to confirm the sanitiser covers that value.
 - **It's tested on secure code too.** A "safe" test project must produce zero findings.
 
@@ -211,9 +221,16 @@ Breakr reads source code. It can't see:
 - RLS policies that exist only in the Supabase dashboard
 - business-logic flaws
 
-The built-in vulnerability list is small and curated; use `--osv`, `npm audit`
-or `pip-audit` for full dependency coverage. Use Breakr alongside dynamic
-testing and human review, not instead of them.
+Also:
+
+- **Data flow:** analysis is heuristic and looks at one file at a time. The
+  only cross-file tracing is for router mounting.
+- **Django:** URLconf views are not analysed for auth.
+- **Dependencies:** the built-in vulnerability list is a small, curated
+  snapshot (about 40 high-impact advisories). Use `--osv`, `npm audit` or
+  `pip-audit` for full coverage.
+
+Use Breakr alongside dynamic testing and human review, not instead of them.
 
 Only scan code you own or are authorised to test.
 
@@ -254,3 +271,7 @@ The goal is to build a growing ecosystem of practical, reusable skills for AI mo
 ## Author
 
 **Ayush Sharma**
+
+## License
+
+[MIT](LICENSE)

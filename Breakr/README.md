@@ -12,27 +12,34 @@ findings are **leads**. When Breakr runs as a skill (see [`SKILL.md`](SKILL.md))
 the AI reads each lead against the real code, using the triage guides in
 [`Prompts/`](Prompts), and reports only what holds up, with fixes.
 
+Output from a run on the deliberately vulnerable test project, trimmed:
+
 ```
 $ python main.py ../my-app
 
 BREAKR 1.0.0
-Technologies: Express, Next.js, React, Supabase, ...
+...
+Technologies:
+- Django, Docker, Express, Firebase, Flask, JWT, Next.js, Node.js, Python, React, SQL, Supabase, TypeScript
+
 Selected Agents:
 - SecretBreaker (always runs)
-- AuthBreaker (Express, Next.js detected)
-- SupabaseFirebaseBreaker (Supabase detected)
-  ...
-
-[CRITICAL] BRK-001 Supabase service_role key committed to the repository
-  Location:   src/lib/supabase.js:2
-  Evidence:   createClient(process.env.SUPABASE_URL, "eyJh************")
-[HIGH] BRK-002 State-changing route without visible authentication
-  Location:   server.js:9
-  Evidence:   POST /api/users -> app.post('/api/users', async (req, res) => {
+- AuthBreaker (Django, Express, Flask, Next.js, Node.js, Python detected)
+- SupabaseFirebaseBreaker (Firebase, Supabase detected)
 ...
+
+[CRITICAL] BRK-003 Supabase service_role key committed to the repository
+  Location:   src/lib/supabase.js:2
+  Agent:      SupabaseFirebaseBreaker   Confidence: 0.95   CWE-798
+  Evidence:   export const supabaseAdmin = createClient(process.env.SUPABASE_URL, "eyJh************");
+...
+========================================
+Audit complete.
 Risk level: CRITICAL
-Report: Reports/security_report.json
-Report: Reports/security_report.md
+Findings: CRITICAL 5  HIGH 41  MEDIUM 23  LOW 7  INFO 0  (total 76)
+Correlated locations: 4
+Report: .../Breakr/Reports/security_report.json
+Report: .../Breakr/Reports/security_report.md
 ```
 
 ---
@@ -41,7 +48,7 @@ Report: Reports/security_report.md
 
 | # | Agent | Finds | Runs when |
 |---|---|---|---|
-| 1 | **SecretBreaker** | AWS, GitHub, Stripe, OpenAI, Anthropic, Slack, SendGrid, Twilio and Google keys; private keys; DB URLs with passwords; hardcoded passwords/tokens; `.env` files not in `.gitignore`. Evidence is always masked. | always |
+| 1 | **SecretBreaker** | AWS, GitHub, Stripe, OpenAI, OpenRouter, Anthropic, Slack, SendGrid, Twilio and Google keys; private keys; DB URLs with passwords; hardcoded passwords/tokens; `.env` files that git doesn't ignore. Evidence is always masked. | always |
 | 2 | **AuthBreaker** | POST/PUT/PATCH/DELETE routes, Next.js server actions and API handlers with no authentication; admin routes with no role check; webhooks with no signature check; role checks done only in the browser; tokens in `localStorage` | a web stack is detected |
 | 3 | **APIBreaker** | Sensitive GET endpoints with no auth, IDOR (fetch by id without an ownership check), mass assignment (`User.create(req.body)`), stack traces sent to clients, login endpoints with no rate limiting | a web stack is detected |
 | 4 | **InjectionBreaker** | SQL injection (f-strings, template literals, concatenation, `$queryRawUnsafe`), NoSQL injection, command injection, `eval`/`exec`, SSTI, `pickle`/`yaml.load`, XXE | always |
@@ -56,7 +63,7 @@ The **Head Agent** (`Core/head_agent.py`) does four things:
 
 - It picks the agents that fit the detected stack.
 - It runs them, and one crashing agent never stops the audit.
-- It removes duplicates and lowers the confidence of findings in test, fixture and example code.
+- It removes duplicates and halves the confidence of findings in test, fixture, example and seed code.
 - It groups lines flagged by more than one agent (`correlated_groups`). Those are the best place to start.
 
 ### How Breakr keeps noise down
@@ -65,7 +72,9 @@ The **Head Agent** (`Core/head_agent.py`) does four things:
 - **Rules that look for code ignore string contents.** A rule like the one for `verify=False` doesn't fire on documentation strings.
 - **Auth is traced across files.** A route counts as protected when the auth check is in its handler, at file level (`router.use(requireAuth)`, `APIRouter(dependencies=...)`, `before_request`), or in the file that mounts it (`app.use('/admin', requireAdmin, adminRouter)`).
 - **Public routes aren't flagged.** Login, signup, health checks and webhooks are recognised as public. Webhooks get their own check: is the signature verified?
-- **Placeholders aren't secrets.** Values like `your-api-key`, `${VAR}`, package versions and translation files are skipped. A `.env` file that git ignores is treated as the right place for secrets.
+- **Placeholders aren't secrets.** Values like `your-api-key`, `${VAR}`, package versions and translation files are skipped. A `.env` file that git ignores is treated as the right place for secrets. Breakr asks `git check-ignore`, so nested `.gitignore` files count, and it falls back to reading `.gitignore` files outside a git repo.
+- **Built bundles are skipped.** Minified JS/CSS (very long average line length) isn't your source and is ignored.
+- **Intentional fixtures can opt out.** A file whose first 2 KB contain a comment line that is exactly `breakr: ignore-file` (`# breakr: ignore-file`, `// breakr: ignore-file`, ...) is skipped and listed under `ignored_files` in the report. `--include-ignored` scans such files anyway. Breakr's own vulnerable test fixtures use this, so a self-audit reports 0 findings.
 - **A sanitiser in the file lowers the severity.** If XSS or path findings sit in a file that calls DOMPurify, `secure_filename`, `basename` or similar, Breakr lowers the severity and asks you to confirm the sanitiser covers that exact value.
 - **A "safe" project is tested to give zero findings.** The test suite contains a project that follows secure practices, and the tests fail if any agent reports anything on it.
 
@@ -73,7 +82,7 @@ The **Head Agent** (`Core/head_agent.py`) does four things:
 
 ## Install
 
-Requires **Python 3.11+**. No packages to install.
+Requires **Python 3.11+** (the newest stdlib module used is `tomllib`; the test suite is run on 3.13 and 3.14). No packages to install.
 
 ```bash
 git clone https://github.com/thisIsAyushFr/Skills-For-AI
@@ -116,6 +125,7 @@ python main.py <project_path> [options]
 |---|---|
 | `--agents A,B` | Run only these agents (default: picked from the detected stack) |
 | `--exclude PATTERN` | Skip matching files/folders. Can be repeated: `--exclude tests --exclude "legacy/*"` |
+| `--include-ignored` | Also scan files marked `breakr: ignore-file` |
 | `--format json\|markdown\|both` | Report format (default `both`) |
 | `--output-dir DIR` | Where reports go (default `Breakr/Reports/`) |
 | `--min-severity LEVEL` | Hide findings below `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`INFO` |
@@ -126,8 +136,15 @@ python main.py <project_path> [options]
 | `--no-color` | Plain output (also respects `NO_COLOR`) |
 | `--list-agents` | Describe every agent and exit |
 | `--debug` | Show tracebacks if an agent crashes |
+| `--version` | Print the version |
 
-Exit codes: `0` = success, `1` = error, `2` = the `--fail-on` threshold was reached.
+Exit codes:
+
+- `0`: success
+- `1`: error, such as a missing folder, a path that is a file, an unknown agent, invalid arguments, or a report directory that can't be written
+- `2`: the `--fail-on` threshold was reached, and nothing else
+
+A crashing agent doesn't change the exit code: its error is printed and recorded under `agents[].error`, and the other agents still run.
 
 ### In CI (GitHub Actions)
 
@@ -144,14 +161,19 @@ Each run writes `security_report.json` (for tools and the AI) and
 
 ```jsonc
 {
-  "summary": { "risk_level": "CRITICAL", "total_findings": 77, "severity_counts": { ... } },
-  "agents": [ { "name": "AuthBreaker", "reason": "Express detected", "findings": 9,
-                "seconds": 0.04, "error": null, "prompt_file": "Prompts/Auth.txt" } ],
-  "findings": [ { "id": "BRK-001", "agent": "...", "title": "...", "severity": "CRITICAL",
-                  "confidence": 0.95, "file": "src/lib/supabase.js", "line": 2,
-                  "evidence": "...masked...", "explanation": "...", "recommendation": "...",
-                  "cwe": "CWE-798" } ],
-  "correlated_groups": [ { "file": "server.js", "line": 25, "finding_ids": ["BRK-024", "BRK-044"] } ]
+  "tool": "Breakr", "version": "1.0.0", "generated_at": "...",
+  "project": { "project_path": "...", "technologies": [ ... ], "file_count": 17, "ignored_files": [] },
+  "summary": { "risk_level": "CRITICAL", "total_findings": 76, "severity_counts": { ... },
+               "agent_counts": { ... }, "correlated_groups": 4 },
+  "agents": [ { "name": "AuthBreaker", "reason": "Express, Next.js detected", "findings": 12,
+                "seconds": 0.04, "error": null, "prompt_file": "Prompts/Auth.txt", ... } ],
+  "skipped_agents": [ ... ],
+  "findings": [ { "id": "BRK-003", "agent": "SupabaseFirebaseBreaker", "title": "...",
+                  "severity": "CRITICAL", "confidence": 0.95, "file": "src/lib/supabase.js",
+                  "line": 2, "evidence": "...masked...", "explanation": "...",
+                  "recommendation": "...", "cwe": "CWE-798" } ],
+  "correlated_groups": [ { "group_id": 1, "file": ".env", "line": 1, "finding_count": 2,
+                           "agents": ["SecretBreaker"], "finding_ids": ["BRK-010", "BRK-020"] } ]
 }
 ```
 
@@ -226,6 +248,15 @@ vulnerable and covers every agent. The other follows secure practices and must
 produce **zero** findings. Fake secrets are put together at runtime, so none
 are ever committed.
 
+The suite also covers:
+
+- the CLI end to end: report formats, `--agents`, `--exclude`, `--fail-on`
+- error handling: missing or invalid paths, bad arguments, an unwritable
+  output directory, an agent that crashes
+- the ignore marker
+- a clean self-audit of Breakr itself
+- the skill files: `SKILL.md` frontmatter, and a triage prompt for every agent
+
 ## Limitations
 
 Breakr reads source code. It can't see:
@@ -236,8 +267,21 @@ Breakr reads source code. It can't see:
 - RLS policies that exist only in the Supabase dashboard
 - business-logic flaws
 
-Data-flow analysis is heuristic and limited to one file at a time, except for
-router mounting. Use it alongside dependency audits (`npm audit`, `pip-audit`),
-a dynamic scanner, and human review. Breakr is not a replacement for them.
+Its other limits:
+
+- **Data flow:** analysis is heuristic and looks at one file at a time. The
+  only cross-file tracing is for router mounting.
+- **Route detection:** covers Express/Fastify/Koa-style routers,
+  Flask/FastAPI decorators, NestJS, and Next.js App Router, Pages API and
+  Server Actions. Django URLconf views are not analysed for auth.
+- **Dependency advisories:** the built-in list is a small, curated snapshot
+  (about 40 high-impact advisories). Use `--osv` for current data.
+
+Use Breakr alongside dependency audits (`npm audit`, `pip-audit`), a dynamic
+scanner, and human review. It doesn't replace any of them.
 
 Only scan code you own or are authorised to test.
+
+## License
+
+MIT. See [LICENSE](../LICENSE).

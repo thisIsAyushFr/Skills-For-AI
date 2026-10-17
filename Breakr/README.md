@@ -15,7 +15,7 @@ the AI reads each lead against the real code, using the triage guides in
 ```
 $ python main.py ../my-app
 
-BREAKR 0.2.0
+BREAKR 1.0.0
 Technologies: Express, Next.js, React, Supabase, ...
 Selected Agents:
 - SecretBreaker (always runs)

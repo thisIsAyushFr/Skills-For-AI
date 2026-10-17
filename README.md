@@ -12,14 +12,22 @@ This repository is a growing library of specialized AI skills, each designed to 
 
 Breakr is a security auditing skill for analyzing finished or AI-generated codebases for potential security issues.
 
-It can detect and analyze areas such as:
+Ten specialised agents detect and analyze:
 
-- Hardcoded secrets
-- Missing server-side authorization
-- Potentially exposed API endpoints
-- Related security findings
+- Hardcoded secrets and leaked API keys
+- Missing server-side authentication and authorization
+- Exposed API endpoints, IDOR and mass assignment
+- SQL, NoSQL, command and code injection
+- Cross-site scripting (XSS)
+- Insecure configuration (debug mode, CORS, cookies, TLS)
+- Vulnerable and unpinned dependencies
+- Weak cryptography and JWT misuse
+- Supabase / Firebase misconfigurations (service keys, RLS, open rules)
+- Unsafe file uploads and path traversal
 
 Breakr combines deterministic security analysis with AI-assisted interpretation to produce clear, structured security audits.
+
+See [Breakr/README.md](Breakr/README.md) for usage and [Breakr/SKILL.md](Breakr/SKILL.md) for the skill workflow.
 
 **Status:** v1.0.0
 

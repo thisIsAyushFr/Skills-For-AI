@@ -1,236 +1,233 @@
 from pathlib import Path
 import re
 
-from Models.Finding import Finding
+from Agents.base_breaker import (
+    BaseBreaker,
+    COMPONENT_EXTENSIONS,
+    JS_EXTENSIONS,
+    PYTHON_EXTENSIONS,
+    WEB_TECHNOLOGIES,
+    LineIndex,
+    Rule,
+    clip,
+    strip_comments,
+)
+from Agents.web_routes import (
+    AUTHENTICATION,
+    AUTHORIZATION,
+    file_level_protection,
+    find_routes,
+    handler_window,
+    project_protection,
+)
 
 
-class AuthBreaker:
+WEBHOOK_VERIFICATION = re.compile(
+    r"signature|constructevent|hmac|svix|webhook_?secret|x-hub-signature|"
+    r"timingsafeequal|compare_digest|verify",
+    re.IGNORECASE,
+)
 
-    def __init__(self, project_path: str):
-        self.project_path = Path(project_path).resolve()
+CLIENT_EXTENSIONS = frozenset(JS_EXTENSIONS | COMPONENT_EXTENSIONS)
 
-    def is_relevant_file(self, file_path: Path):
-        """
-        Determine whether a file is likely related to
-        authentication, authorization, admin functionality,
-        or API routes.
-        """
-
-        path = str(
-            file_path.relative_to(self.project_path)
-        ).lower()
-
-        keywords = {
-            "admin",
-            "auth",
-            "login",
-            "user",
-            "account",
-            "api",
-            "route",
-            "protected",
-            "permission",
-            "role",
-        }
-
-        return any(
-            keyword in path
-            for keyword in keywords
-        )
-
-    def contains_authorization_check(self, content: str):
-
-        # Remove comments before searching for authorization logic.
-        # This prevents comments such as:
-        # "There is no authorization check"
-        # from being treated as real security controls.
-
-        content_without_comments = re.sub(
-            r"#.*",
-            "",
-            content
-        )
-
-        authorization_patterns = [
-            r"\brole\b",
-            r"\bisAdmin\b",
-            r"\bis_admin\b",
-            r"\bpermission\b",
-            r"\bauthori[sz]e\b",
-            r"\bauthori[sz]ation\b",
-            r"\bpermissions\b",
-            r"\brequireAdmin\b",
-            r"\brequire_admin\b",
-            r"\bcheckRole\b",
-            r"\bcheck_role\b",
-            r"\bverifyRole\b",
-            r"\bverify_role\b",
-        ]
-
-        for pattern in authorization_patterns:
-            if re.search(
-                pattern,
-                content_without_comments,
-                re.IGNORECASE
-            ):
-                return True
-
-        return False
-
-    def scan_file(self, file_path: Path):
-
-        findings = []
+CLIENT_RULES = [
+    Rule(
+        title="Authorization decided in client-side code",
+        pattern=(
+            r"\b(?:user|currentUser|session\??\.user|profile|me|account)\??\."
+            r"(?:role|isAdmin|is_admin)\s*(?:===?|!==?)\s*[\"'`](?:admin|superadmin|owner)[\"'`]"
+            r"|(?:if\s*\(\s*!?|\{\s*!?)(?:user|currentUser|session\??\.user|profile|me|account)"
+            r"\??\.(?:isAdmin|is_admin)\b"
+        ),
+        severity="LOW",
+        confidence=0.4,
+        explanation=(
+            "A role or admin flag is checked in code that may run in the "
+            "browser. Anyone can edit client-side code, so this check only "
+            "hides UI; it does not protect data."
+        ),
+        recommendation=(
+            "Keep the client-side check for UX, but make sure every API "
+            "route or database policy behind this screen enforces the same "
+            "role on the server."
+        ),
+        cwe="CWE-602",
+        extensions=frozenset({".jsx", ".tsx", ".vue", ".svelte"}),
+    ),
+    Rule(
+        title="Auth token stored in localStorage",
+        pattern=(
+            r"localStorage\.setItem\(\s*[\"'`](?:token|jwt|access_?token|"
+            r"id_?token|auth_?token|auth|session|refresh_?token)[\"'`]"
+        ),
+        severity="LOW",
+        confidence=0.6,
+        explanation=(
+            "Tokens in localStorage can be read by any script on the page, "
+            "so a single XSS bug lets an attacker steal user sessions."
+        ),
+        recommendation=(
+            "Prefer HttpOnly, Secure, SameSite cookies for session tokens, "
+            "or keep tokens in memory with short lifetimes."
+        ),
+        cwe="CWE-922",
+        extensions=CLIENT_EXTENSIONS,
+    ),
+]
 
 
-        try:
-            content = file_path.read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
-        except OSError:
-            return findings
+class AuthBreaker(BaseBreaker):
 
-        # Look for API/route definitions
-        route_pattern = (
-            r"(app\.(get|post|put|patch|delete)"
-            r"|router\.(get|post|put|patch|delete)"
-            r"|export\s+(async\s+)?function\s+"
-            r"(GET|POST|PUT|PATCH|DELETE)"
-            r"|@app\.(get|post|put|patch|delete))"
-        )
+    name = "AuthBreaker"
+    description = (
+        "Routes that change data without login, admin routes without "
+        "role checks, unverified webhooks, client-only auth"
+    )
+    prompt_file = "Auth.txt"
+    trigger_technologies = WEB_TECHNOLOGIES
+    extensions = JS_EXTENSIONS | PYTHON_EXTENSIONS | COMPONENT_EXTENSIONS
 
-        has_route = re.search(
-            route_pattern,
-            content,
-            re.IGNORECASE
-        )
-
-        if not has_route:
-            return findings
-
-        has_authorization = self.contains_authorization_check(
-            content
-        )
-
-        if not has_authorization:
-
-            relative_file = str(
-                file_path.relative_to(
-                    self.project_path
-                )
-            )
-
-            findings.append(
-                Finding(
-                    agent="AuthBreaker",
-                    title=(
-                        "Potential missing server-side "
-                        "authorization"
-                    ),
-                    severity="HIGH",
-                    confidence=0.70,
-                    file=relative_file,
-                    line=content[:has_route.start()].count("\n") + 1,
-                    evidence=(
-                        "A potential API/route was detected, "
-                        "but no obvious authorization check "
-                        "was found in the file."
-                    ),
-                    explanation=(
-                        "The endpoint may rely on frontend "
-                        "authorization or another mechanism "
-                        "that was not visible during this scan."
-                    ),
-                    recommendation=(
-                        "Verify that authentication and "
-                        "authorization are enforced server-side "
-                        "for this endpoint. Do not rely solely "
-                        "on frontend access controls."
-                    ),
-                )
-            )
-
-        return findings
-
-    def scan(self):
+    def scan_file(self, file_path: Path, content: str):
 
         findings = []
+        relative = self.relative(file_path)
+        code = strip_comments(content, file_path)
 
-        ignored_directories = {
-            ".git",
-            "node_modules",
-            "__pycache__",
-            ".venv",
-            "venv",
-            "env",
-            ".next",
-            "dist",
-            "build",
-        }
+        findings.extend(
+            self.scan_rules(file_path, content, CLIENT_RULES, code)
+        )
 
-        for path in self.project_path.rglob("*"):
+        routes = find_routes(code, relative)
 
-            if not path.is_file():
+        if not routes:
+            return findings
+
+        # -------------------------
+        # Protection that covers the whole file
+        # -------------------------
+
+        file_authn, file_authz = file_level_protection(code)
+
+        mounted, next_middleware_auth = project_protection(
+            str(self.project_path),
+            tuple(self.files),
+        )
+
+        mounted_authn, mounted_authz = mounted.get(relative, (False, False))
+
+        file_authn = file_authn or mounted_authn
+        file_authz = file_authz or mounted_authz
+
+        index = LineIndex(content)
+
+        # -------------------------
+        # Check each route
+        # -------------------------
+
+        for position, route in enumerate(routes):
+
+            window = handler_window(code, routes, position)
+
+            authn = file_authn or bool(AUTHENTICATION.search(window))
+            authz = file_authz or bool(AUTHORIZATION.search(window))
+
+            evidence = clip(
+                f"{route.method_label} {route.path} -> {index.text(route.line)}"
+            )
+
+            def add(title, severity, confidence, explanation, recommendation, cwe):
+                findings.append(
+                    self.make_finding(
+                        title=title,
+                        severity=severity,
+                        confidence=confidence,
+                        file=relative,
+                        line=route.line,
+                        evidence=evidence,
+                        explanation=explanation,
+                        recommendation=recommendation,
+                        cwe=cwe,
+                    )
+                )
+
+            # Webhooks are public by design but must verify the sender.
+            if "webhook" in route.path.lower() and route.is_state_changing:
+
+                if not WEBHOOK_VERIFICATION.search(window):
+                    add(
+                        "Webhook without signature verification",
+                        "HIGH",
+                        0.6,
+                        "This webhook endpoint accepts requests without any "
+                        "visible signature check, so anyone who finds the URL "
+                        "can send fake events (for example fake payments).",
+                        "Verify the provider's signature header (e.g. "
+                        "stripe.webhooks.constructEvent, Svix, or an HMAC "
+                        "compared with a constant-time function) before "
+                        "trusting the payload.",
+                        "CWE-345",
+                    )
+
                 continue
 
-            relative_parts = path.relative_to(
-                self.project_path
-            ).parts
+            # Admin routes need a role check, not just a login check.
+            if route.is_admin:
 
-            if any(
-                part in ignored_directories
-                for part in relative_parts
-            ):
+                if not authz:
+                    add(
+                        "Admin route without role check"
+                        if authn
+                        else "Admin route without authentication or role check",
+                        "HIGH",
+                        0.6 if authn else 0.7,
+                        "This route looks administrative but no role, "
+                        "permission or admin check is visible in the handler, "
+                        "the file, or the middleware it is mounted behind. "
+                        + (
+                            "Any logged-in user may be able to call it."
+                            if authn
+                            else "Anyone may be able to call it."
+                        ),
+                        "Enforce an admin/role check on the server for this "
+                        "route (middleware, decorator or guard). Hiding the "
+                        "admin page in the frontend is not enough.",
+                        "CWE-285",
+                    )
+
                 continue
 
-            findings.extend(
-                self.scan_file(path)
+            if not route.is_state_changing or route.is_public or authn:
+                continue
+
+            severity = "HIGH"
+            confidence = 0.6
+            note = ""
+
+            if route.framework.startswith("nextjs") and next_middleware_auth:
+                severity = "LOW"
+                confidence = 0.35
+                note = (
+                    " A Next.js middleware file with auth logic exists; "
+                    "confirm its matcher covers this route and that the "
+                    "handler does not rely on it alone."
+                )
+
+            add(
+                "State-changing route without visible authentication",
+                severity,
+                confidence,
+                f"{route.method_label} {route.path} can create, change or "
+                "delete data, but no authentication check is visible in the "
+                "handler, the file, or the middleware it is mounted behind."
+                + note,
+                "Require a verified session or token on the server before "
+                "running this handler. Do not rely on the frontend hiding "
+                "the button.",
+                "CWE-306",
             )
 
         return findings
 
 
 if __name__ == "__main__":
-
-    breaker = AuthBreaker(".")
-
-    findings = breaker.scan()
-
-    print("\nAUTH BREAKER")
-    print("=" * 40)
-
-    if not findings:
-
-        print("\nNo potential authorization issues found.")
-
-    else:
-
-        print(
-            f"\nPotential findings: {len(findings)}\n"
-        )
-
-        for finding in findings:
-
-            print(
-                f"[{finding.severity}] "
-                f"{finding.title}"
-            )
-
-            print(
-                f"Agent: {finding.agent}"
-            )
-
-            print(
-                f"Location: "
-                f"{finding.file}:{finding.line}"
-            )
-
-            print(
-                f"Confidence: "
-                f"{finding.confidence}"
-            )
-
-            print(
-                f"Evidence: "
-                f"{finding.evidence}\n"
-            )
+    AuthBreaker.cli()

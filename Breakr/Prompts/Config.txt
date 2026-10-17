@@ -1,0 +1,34 @@
+AGENT: ConfigBreaker
+Detects: DEBUG = True, Flask app.run(debug=True), ALLOWED_HOSTS = ['*'],
+CORS wildcard / reflected origin / default cors(), cookies with httpOnly or
+secure disabled, well-known session secrets, TLS verification disabled
+(verify=False, rejectUnauthorized: false, CERT_NONE), CSRF disabled,
+GraphQL introspection/playground, production source maps, directory
+listing, Express apps without helmet, Dockerfiles without a non-root USER.
+Files named like dev/local/test are reported as INFO.
+
+HOW TO VERIFY
+1. Does this setting reach production?
+   - Look for environment switches (NODE_ENV, settings/production.py,
+     if __name__ == "__main__" blocks that only run locally).
+   - Check deployment config (Dockerfile CMD, Procfile, vercel.json,
+     docker-compose) to see which settings file is used.
+2. CORS
+   - Wildcard on a fully public, unauthenticated API: LOW.
+   - Wildcard or reflected origin WITH credentials / cookie auth: HIGH -
+     any site can act as the logged-in user.
+3. TLS verification off: confirm the call goes over the internet (not a
+   localhost sidecar). Over the internet: HIGH.
+4. CSRF exempt: fine for token-authenticated APIs and verified webhooks; a
+   finding for cookie-authenticated form endpoints.
+5. Session secrets: "keyboard cat", "secret", django-insecure-... in a file
+   used in production = anyone can forge sessions: HIGH/CRITICAL.
+
+FIX PATTERNS
+  Django:   DEBUG = os.environ.get("DJANGO_DEBUG") == "1"; real ALLOWED_HOSTS
+  Flask:    app.run(debug=os.environ.get("FLASK_DEBUG") == "1")
+  CORS:     cors({ origin: ["https://app.example.com"], credentials: true })
+  Cookies:  { httpOnly: true, secure: true, sameSite: "lax" }
+  TLS:      remove verify=False; use verify="/path/to/ca.pem" for private CAs
+  Headers:  app.use(helmet()) with a Content-Security-Policy
+  Docker:   RUN adduser -D app && USER app

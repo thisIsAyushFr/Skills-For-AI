@@ -1,0 +1,34 @@
+AGENT: DependencyBreaker
+Detects: dependencies matching a curated list of high-impact advisories
+(or live OSV.dev data when run with --osv), dependencies not pinned at all
+(*, latest, git/URL sources), unpinned requirements.txt entries, and
+JavaScript projects without a lockfile. Installed versions come from
+package-lock / yarn.lock / pnpm-lock / poetry.lock / uv.lock when present.
+
+HOW TO VERIFY
+1. Exact vs range
+   - "Vulnerable dependency: X 1.2.3": version is pinned or locked: real.
+   - "Dependency range allows vulnerable X versions": no lockfile pins the
+     installed version, so Breakr used the lowest version the range allows.
+     Check the actually installed version (npm ls X, pip show X) before
+     confirming.
+2. Is the vulnerable code path reachable? Read the advisory (CVE / GHSA id in
+   the evidence; OSV link in the explanation). Examples:
+   - next CVE-2025-29927 only matters if middleware does auth: but if it
+     does, it is CRITICAL.
+   - Template-engine RCEs matter only if users can supply templates.
+   Unreachable: lower severity, but still recommend upgrading.
+3. devDependencies are not shipped to production (usually LOW), unless they
+   run in CI with secrets.
+4. The built-in list is intentionally small. If the user wants full
+   coverage, run with --osv or suggest npm audit / pip-audit / osv-scanner.
+
+FIX
+- Upgrade to the fixed version named in the recommendation (or latest),
+  then run the test suite.
+- npm: npm install X@^fixed && commit package-lock.json; use npm ci in CI.
+- Python: pin exact versions (pip-tools / uv / poetry lock), consider
+  --require-hashes.
+- Packages with no fix (e.g. vm2): replace them (isolated-vm, a separate
+  process, or a hosted sandbox).
+- Add Dependabot / Renovate so this does not drift again.

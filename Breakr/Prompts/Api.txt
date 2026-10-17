@@ -1,0 +1,39 @@
+AGENT: APIBreaker
+Detects: GET endpoints that return sensitive resources (users, orders,
+payments, admin, settings...) with no visible authentication; possible IDOR
+(record fetched by URL id with no ownership check); mass assignment
+(req.body / **request.json passed straight to the database); stack traces or
+raw errors returned to clients; login/OTP/password endpoints in a project
+with no rate limiting anywhere.
+
+HOW TO VERIFY
+1. Sensitive endpoint without auth
+   - Same tracing as AuthBreaker: handler, file-level middleware, mounting
+     file, Next.js middleware matcher.
+   - Look at what is actually returned. A public product list is fine; a list
+     of users with emails is not. Check for password hashes, tokens, emails,
+     addresses or internal IDs in the response (select only needed fields).
+2. IDOR
+   - Is the lookup scoped to the current user (WHERE user_id = me), or is
+     ownership/role checked after loading? If not, any logged-in user can
+     enumerate other users' records by changing the id: CONFIRMED.
+   - UUIDs make guessing harder but are NOT access control.
+3. Mass assignment
+   - Look at the model/schema: does it have fields like role, isAdmin,
+     verified, balance, credits, ownerId, plan? If yes and the body is passed
+     through unfiltered: HIGH. If a validation schema with unknown keys
+     stripped (zod .strict(), Joi stripUnknown, pydantic extra="forbid") runs
+     first: dismiss.
+4. Error leakage
+   - Check whether this runs in production (NODE_ENV checks, error handler
+     ordering). Stack traces and SQL errors in responses: MEDIUM.
+5. Rate limiting
+   - Check for platform-level limits (Cloudflare, Vercel firewall, API
+     gateway, Supabase/Firebase built-in auth limits) before confirming.
+
+FIX PATTERNS
+  Scope queries:   findFirst({ where: { id, userId: session.user.id } })
+  Allowlist input: const { title, body } = schema.parse(req.body)
+  Errors:          log server-side, return { error: "Internal error", id }
+  Rate limit:      express-rate-limit / @upstash/ratelimit / slowapi on
+                   login, signup, password reset and OTP endpoints

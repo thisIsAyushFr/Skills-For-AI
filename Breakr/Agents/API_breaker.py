@@ -1,289 +1,337 @@
 from pathlib import Path
 import re
 
-from Models.Finding import Finding
+from Agents.base_breaker import (
+    BaseBreaker,
+    JS_EXTENSIONS,
+    PYTHON_EXTENSIONS,
+    WEB_TECHNOLOGIES,
+    LineIndex,
+    Rule,
+    clip,
+    strip_comments,
+)
+from Agents.web_routes import (
+    AUTHENTICATION,
+    file_level_protection,
+    find_routes,
+    handler_window,
+    project_protection,
+)
 
 
-class APIBreaker:
+JS = frozenset(JS_EXTENSIONS)
+PY = frozenset(PYTHON_EXTENSIONS)
 
-    def __init__(self, project_path: str):
-        self.project_path = Path(project_path).resolve()
+ID_PARAMETER = re.compile(
+    r":\w*id\b|\{\w*id\}|\[\w*id\]|<(?:\w+:)?\w*id>",
+    re.IGNORECASE,
+)
 
-    def is_relevant_file(self, file_path: Path):
-        path = str(
-            file_path.relative_to(self.project_path)
-        ).lower()
+LOOKUP_BY_ID = re.compile(
+    r"findbyid|findbypk|findunique|findfirst|findone|get_object_or_404|"
+    r"query\.get\(|\.get\(\s*\w*id|filter_by\(|\.filter\(|\.where\(|"
+    r"\.eq\(\s*[\"'`]id[\"'`]|params\.\w*id|params\[",
+    re.IGNORECASE,
+)
 
-        keywords = {
-            "api",
-            "route",
-            "server",
-            "backend",
-            "app",
-            "controller",
-            "endpoint",
-        }
+OWNERSHIP_CHECK = re.compile(
+    r"req\.user|request\.user|current_user|user_?id|owner|session\.user|"
+    r"auth\.uid|\.eq\(\s*[\"'`]user_id|tenant|org(?:anization)?_?id",
+    re.IGNORECASE,
+)
 
-        return any(
-            keyword in path
-            for keyword in keywords
-        )
+LOGIN_ROUTE = re.compile(r"log-?in|sign-?in|auth/token|/token\b|otp|password", re.IGNORECASE)
 
-    def contains_protection(self, content: str):
-        protection_patterns = [
-            r"\bauthori[sz]e\b",
-            r"\bauthori[sz]ation\b",
-            r"\bauthenticate\b",
-            r"\bauthentication\b",
-            r"\brequireauth\b",
-            r"\brequire_auth\b",
-            r"\bverifytoken\b",
-            r"\bverify_token\b",
-            r"\bverifyjwt\b",
-            r"\bverify_jwt\b",
-            r"\bmiddleware\b",
-            r"\bisAdmin\b",
-            r"\bis_admin\b",
-            r"\bpermission\b",
-            r"\bpermissions\b",
-            r"\brole\b",
-        ]
+RATE_LIMITING = re.compile(
+    r"rate-?limit|ratelimit|slowapi|limiter|throttl|express-brute|"
+    r"flask_limiter|@Throttle|upstash/ratelimit|rate_limit",
+    re.IGNORECASE,
+)
 
-        for pattern in protection_patterns:
-            if re.search(
-                pattern,
-                content,
-                re.IGNORECASE
-            ):
-                return True
+MASS_ASSIGNMENT = dict(
+    title="Mass assignment from request body",
+    severity="MEDIUM",
+    confidence=0.6,
+    explanation=(
+        "The whole request body is passed straight into a database write. "
+        "An attacker can add extra fields such as role, isAdmin, balance "
+        "or ownerId and the database will save them."
+    ),
+    recommendation=(
+        "Pick allowed fields explicitly (or validate with a schema such as "
+        "zod / Joi / pydantic with extra fields forbidden) before writing "
+        "to the database."
+    ),
+    cwe="CWE-915",
+)
 
-        return False
+RULES = [
+    Rule(
+        pattern=(
+            r"\.(?:create|insert|insertOne|insertMany|update|updateOne|updateMany|"
+            r"upsert|build|bulkCreate|findByIdAndUpdate|findOneAndUpdate)\(\s*"
+            r"(?:[^,()]+,\s*)?(?:\{\s*\.\.\.\s*)?req\.body\s*[,)}]"
+        ),
+        extensions=JS,
+        **MASS_ASSIGNMENT,
+    ),
+    Rule(
+        pattern=(
+            r"Object\.assign\(\s*\w+\s*,\s*req\.body\s*\)"
+            r"|\bdata\s*:\s*req\.body\b"
+            r"|new\s+[A-Z]\w*\(\s*req\.body\s*\)"
+        ),
+        extensions=JS,
+        ignore_case=False,
+        **MASS_ASSIGNMENT,
+    ),
+    Rule(
+        pattern=(
+            r"\b[A-Z]\w*(?:\.objects\.create)?\(\s*\*\*\s*(?:await\s+)?request\."
+            r"(?:json|form|data|POST|get_json\(\)|json\(\))"
+            r"|\.update\(\s*\*\*\s*(?:await\s+)?request\."
+        ),
+        extensions=PY,
+        ignore_case=False,
+        **MASS_ASSIGNMENT,
+    ),
+    Rule(
+        title="Stack trace returned to client",
+        pattern=(
+            r"res\.(?:status\(\s*\d+\s*\)\s*\.)?(?:json|send)\([^)\n]*"
+            r"\b(?:err|error|e|ex)\.stack\b"
+        ),
+        severity="MEDIUM",
+        confidence=0.7,
+        explanation=(
+            "Stack traces reveal file paths, library versions and internal "
+            "logic that help attackers plan further attacks."
+        ),
+        recommendation=(
+            "Log the full error on the server and return a generic message "
+            "with an error ID to the client."
+        ),
+        cwe="CWE-209",
+        extensions=JS,
+    ),
+    Rule(
+        title="Raw error object returned to client",
+        pattern=(
+            r"res\.(?:status\(\s*5\d\d\s*\)\s*\.)?(?:json|send)\(\s*"
+            r"(?:err|error|e|ex)\s*\)"
+        ),
+        severity="LOW",
+        confidence=0.5,
+        explanation=(
+            "Sending the raw error object can leak database errors, query "
+            "fragments or internal details."
+        ),
+        recommendation="Return a generic error message and log the details server-side.",
+        cwe="CWE-209",
+        extensions=JS,
+    ),
+    Rule(
+        title="Stack trace returned to client",
+        pattern=r"(?:return|jsonify|JSONResponse|HTTPException|Response)[^\n]*traceback\.format_exc\(\)",
+        severity="MEDIUM",
+        confidence=0.7,
+        explanation=(
+            "Stack traces reveal file paths, library versions and internal "
+            "logic that help attackers plan further attacks."
+        ),
+        recommendation=(
+            "Log the traceback on the server and return a generic message "
+            "to the client."
+        ),
+        cwe="CWE-209",
+        extensions=PY,
+    ),
+    Rule(
+        title="Exception message returned to client",
+        pattern=(
+            r"(?:return\s+jsonify|return\s+JSONResponse|raise\s+HTTPException|return\s+Response)"
+            r"\([^\n]*\bstr\(\s*(?:e|err|exc|error|ex)\s*\)"
+        ),
+        severity="LOW",
+        confidence=0.4,
+        explanation=(
+            "Exception messages can include SQL errors, file paths or other "
+            "internal details."
+        ),
+        recommendation="Return a generic error message and log the exception server-side.",
+        cwe="CWE-209",
+        extensions=PY,
+    ),
+]
 
-    def find_routes(self, content: str):
-        route_pattern = (
-            r"(app\.(get|post|put|patch|delete)"
-            r"|router\.(get|post|put|patch|delete)"
-            r"|@app\.(get|post|put|patch|delete)"
-            r"|@router\.(get|post|put|patch|delete)"
-            r"|export\s+(async\s+)?function\s+"
-            r"(GET|POST|PUT|PATCH|DELETE))"
-        )
 
-        return list(
-            re.finditer(
-                route_pattern,
-                content,
-                re.IGNORECASE
-            )
-        )
+class APIBreaker(BaseBreaker):
 
-    def is_sensitive_route(self, content: str, route_match):
-        start = route_match.start()
+    name = "APIBreaker"
+    description = (
+        "Sensitive read endpoints without login, IDOR, mass assignment, "
+        "error leakage, login routes without rate limiting"
+    )
+    prompt_file = "Api.txt"
+    trigger_technologies = WEB_TECHNOLOGIES
+    extensions = JS_EXTENSIONS | PYTHON_EXTENSIONS
 
-        line_start = content.rfind(
-            "\n",
-            0,
-            start
-        ) + 1
+    def scan(self):
+        self._login_routes = []
+        self._rate_limited = False
+        return super().scan()
 
-        line_end = content.find(
-            "\n",
-            start
-        )
+    def scan_file(self, file_path: Path, content: str):
 
-        if line_end == -1:
-            line_end = len(content)
-
-        line = content[line_start:line_end]
-
-        sensitive_keywords = [
-            "admin",
-            "user",
-            "users",
-            "account",
-            "accounts",
-            "payment",
-            "payments",
-            "order",
-            "orders",
-            "customer",
-            "customers",
-            "profile",
-            "profiles",
-            "database",
-            "db",
-            "internal",
-            "private",
-            "secret",
-        ]
-
-        return any(
-            keyword in line.lower()
-            for keyword in sensitive_keywords
-        )
-
-    def scan_file(self, file_path: Path):
         findings = []
+        relative = self.relative(file_path)
+        code = strip_comments(content, file_path)
 
-        try:
-            content = file_path.read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
-        except OSError:
-            return findings
+        if RATE_LIMITING.search(code):
+            self._rate_limited = True
 
-        routes = self.find_routes(content)
+        findings.extend(
+            self.scan_rules(file_path, content, RULES, code)
+        )
+
+        routes = find_routes(code, relative)
 
         if not routes:
             return findings
 
-        for route in routes:
+        file_authn, _ = file_level_protection(code)
 
-            if not self.is_sensitive_route(
-                content,
-                route
+        mounted, next_middleware_auth = project_protection(
+            str(self.project_path),
+            tuple(self.files),
+        )
+
+        file_authn = file_authn or mounted.get(relative, (False, False))[0]
+
+        index = LineIndex(content)
+
+        for position, route in enumerate(routes):
+
+            window = handler_window(code, routes, position)
+            authn = file_authn or bool(AUTHENTICATION.search(window))
+
+            evidence = clip(
+                f"{route.method_label} {route.path} -> {index.text(route.line)}"
+            )
+
+            if route.is_state_changing and LOGIN_ROUTE.search(route.path):
+                self._login_routes.append((relative, route.line, evidence))
+
+            # Admin and state-changing routes are AuthBreaker's job.
+            if not route.is_read or route.is_admin or route.is_public:
+                continue
+
+            if not route.is_sensitive:
+                continue
+
+            # -------------------------
+            # Sensitive data readable without login
+            # -------------------------
+
+            if not authn:
+
+                severity, confidence, note = "MEDIUM", 0.6, ""
+
+                if route.framework.startswith("nextjs") and next_middleware_auth:
+                    severity, confidence = "LOW", 0.35
+                    note = (
+                        " A Next.js middleware file with auth logic exists; "
+                        "confirm its matcher covers this route."
+                    )
+
+                findings.append(
+                    self.make_finding(
+                        title="Sensitive data endpoint without visible authentication",
+                        severity=severity,
+                        confidence=confidence,
+                        file=relative,
+                        line=route.line,
+                        evidence=evidence,
+                        explanation=(
+                            f"GET {route.path} looks like it returns sensitive "
+                            "data, but no authentication check is visible in "
+                            "the handler, the file, or the middleware it is "
+                            "mounted behind." + note
+                        ),
+                        recommendation=(
+                            "Require a verified session or token before "
+                            "returning this data, and return only the fields "
+                            "the caller needs."
+                        ),
+                        cwe="CWE-200",
+                    )
+                )
+
+                continue
+
+            # -------------------------
+            # IDOR: logged in, but can read anyone's record by ID
+            # -------------------------
+
+            if (
+                ID_PARAMETER.search(route.path)
+                and LOOKUP_BY_ID.search(window)
+                and not OWNERSHIP_CHECK.search(window)
             ):
-                continue
-
-            # Look for protection in the surrounding file.
-            if self.contains_protection(content):
-                continue
-
-            line_number = (
-                content[:route.start()]
-                .count("\n")
-                + 1
-            )
-
-            relative_file = str(
-                file_path.relative_to(
-                    self.project_path
+                findings.append(
+                    self.make_finding(
+                        title="Possible IDOR: record fetched by ID without ownership check",
+                        severity="MEDIUM",
+                        confidence=0.45,
+                        file=relative,
+                        line=route.line,
+                        evidence=evidence,
+                        explanation=(
+                            "The handler loads a record using an ID from the "
+                            "URL but never compares it with the logged-in user. "
+                            "A user could change the ID and read someone "
+                            "else's data."
+                        ),
+                        recommendation=(
+                            "Scope the query to the current user (e.g. WHERE "
+                            "id = ? AND user_id = current_user) or check "
+                            "ownership/role before returning the record."
+                        ),
+                        cwe="CWE-639",
+                    )
                 )
-            )
-
-            findings.append(
-                Finding(
-                    agent="APIBreaker",
-                    title=(
-                        "Potential sensitive API "
-                        "endpoint exposure"
-                    ),
-                    severity="MEDIUM",
-                    confidence=0.65,
-                    file=relative_file,
-                    line=line_number,
-                    evidence=(
-                        "A potentially sensitive API "
-                        "route was detected without "
-                        "an obvious protection mechanism "
-                        "in the file."
-                    ),
-                    explanation=(
-                        "The endpoint appears to expose "
-                        "a potentially sensitive resource. "
-                        "The scan did not identify an "
-                        "obvious authentication or "
-                        "authorization mechanism in the "
-                        "same file."
-                    ),
-                    recommendation=(
-                        "Verify that the endpoint requires "
-                        "appropriate authentication and "
-                        "authorization before exposing "
-                        "sensitive data or operations."
-                    ),
-                )
-            )
 
         return findings
 
-    def scan(self):
-        findings = []
+    def scan_project(self):
 
-        ignored_directories = {
-            ".git",
-            "node_modules",
-            "__pycache__",
-            ".venv",
-            "venv",
-            "env",
-            ".next",
-            "dist",
-            "build",
-        }
+        if self._rate_limited or not self._login_routes:
+            return []
 
-        for path in self.project_path.rglob("*"):
-
-            if not path.is_file():
-                continue
-
-            relative_parts = (
-                path.relative_to(
-                    self.project_path
-                ).parts
+        return [
+            self.make_finding(
+                title="Login endpoint without rate limiting",
+                severity="MEDIUM",
+                confidence=0.5,
+                file=file,
+                line=line,
+                evidence=evidence,
+                explanation=(
+                    "No rate limiting library or middleware was found anywhere "
+                    "in the project, so this login/OTP/password endpoint can be "
+                    "brute-forced or used for credential stuffing."
+                ),
+                recommendation=(
+                    "Add rate limiting (express-rate-limit, @upstash/ratelimit, "
+                    "slowapi, Flask-Limiter, or your platform's WAF) to "
+                    "authentication endpoints, keyed by IP and account."
+                ),
+                cwe="CWE-307",
             )
-
-            if any(
-                part in ignored_directories
-                for part in relative_parts
-            ):
-                continue
-
-            findings.extend(
-                self.scan_file(path)
-            )
-
-        return findings
+            for file, line, evidence in self._login_routes
+        ]
 
 
 if __name__ == "__main__":
-
-    breaker = APIBreaker(".")
-
-    findings = breaker.scan()
-
-    print("\nAPI BREAKER")
-    print("=" * 40)
-
-    if not findings:
-
-        print(
-            "\nNo potential API exposure "
-            "issues found."
-        )
-
-    else:
-
-        print(
-            f"\nPotential findings: "
-            f"{len(findings)}\n"
-        )
-
-        for finding in findings:
-
-            print(
-                f"[{finding.severity}] "
-                f"{finding.title}"
-            )
-
-            print(
-                f"Agent: "
-                f"{finding.agent}"
-            )
-
-            print(
-                f"Location: "
-                f"{finding.file}:"
-                f"{finding.line}"
-            )
-
-            print(
-                f"Confidence: "
-                f"{finding.confidence}"
-            )
-
-            print(
-                f"Evidence: "
-                f"{finding.evidence}\n"
-            )
+    APIBreaker.cli()

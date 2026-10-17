@@ -1,0 +1,55 @@
+AGENT: SupabaseFirebaseBreaker
+Supabase and Firebase apps query the database straight from the browser.
+Security therefore rests on two things only: (1) admin keys never reach the
+client, (2) Row Level Security (Supabase) / Security Rules (Firebase) are
+correct. This agent checks both.
+
+Detects: Supabase JWTs whose payload role is service_role, sb_secret_ keys,
+secrets in NEXT_PUBLIC_ / VITE_ / REACT_APP_ / EXPO_PUBLIC_ variables,
+service_role / supabaseAdmin / firebase-admin referenced from client code;
+in SQL migrations: public tables with no ENABLE ROW LEVEL SECURITY, RLS
+disabled, policies with USING (true) / WITH CHECK (true), write grants to
+anon, SECURITY DEFINER functions without search_path; Firebase rules with no
+condition or "if true", test-mode time-limited rules, recursive matches that
+only check request.auth != null, and open Realtime Database rules.
+
+HOW TO VERIFY
+1. Keys
+   - service_role key anywhere in the repo or bundle: CRITICAL, rotate.
+   - The anon / publishable key IS meant to be public. Its exposure is not a
+     finding; what matters is RLS.
+   - "Client code": confirm the file actually runs in the browser ("use
+     client", component imported by a page, Vite/CRA src). Server-only files
+     (route handlers, server actions, edge functions) may use service_role
+     but must check the user themselves first.
+2. RLS (Supabase)
+   - "Table created without RLS" means no migration enables it. RLS may have
+     been enabled in the dashboard. If you can, ask the user to run:
+       select tablename, rowsecurity from pg_tables where schemaname = 'public';
+     Tables with rowsecurity = false are readable/writable by anyone with the
+     anon key: CRITICAL if they hold user data.
+   - USING (true) on SELECT: fine only for genuinely public data.
+     On INSERT/UPDATE/DELETE: anyone can modify every row: HIGH/CRITICAL.
+   - Policies should reference auth.uid(); "to authenticated using (true)"
+     still exposes every user's rows to every other user.
+3. Firebase rules
+   - "allow read, write: if true" or no condition: anyone on the internet.
+   - request.time < timestamp.date(...): test mode, wide open until then.
+   - match /{document=**} with only request.auth != null: any user can read
+     all users' data (sign-up is usually open).
+   - Also check storage.rules and the Realtime Database rules.
+
+FIX PATTERNS
+  Supabase:
+    alter table public.notes enable row level security;
+    create policy "own rows" on public.notes for all
+      using (auth.uid() = user_id) with check (auth.uid() = user_id);
+    Privileged work -> server route / edge function that verifies the user,
+    using SUPABASE_SERVICE_ROLE_KEY from a server-only env var.
+  Firebase:
+    match /notes/{noteId} {
+      allow read, update, delete: if request.auth != null
+                                  && request.auth.uid == resource.data.ownerId;
+      allow create: if request.auth != null
+                    && request.auth.uid == request.resource.data.ownerId;
+    }

@@ -1,283 +1,238 @@
+import time
+import traceback
+
+from Agents import AGENT_REGISTRY, AGENTS_BY_NAME
+from Agents.base_breaker import TEST_PATH
+from Models.Finding import Finding, severity_rank
 from Models.ProjectProfile import ProjectProfile
-from Agents.Secret_breaker import SecretBreaker
-from Agents.Auth_breaker import AuthBreaker
-from Agents.API_breaker import APIBreaker
-from Reports.Reporter import Reporter
 
 
 class HeadAgent:
 
-    def __init__(self, project_profile: ProjectProfile):
+    def __init__(self, project_profile: ProjectProfile, options=None):
         self.project_profile = project_profile
 
-        # Agents selected by the Head Agent
+        # min_severity, min_confidence, osv, debug
+        self.options = options or {}
+
+        # Agent classes selected by the Head Agent
         self.agents = []
+
+        # Agent name -> why it was selected
+        self.selection_reasons = {}
+
+        # Agent name -> {findings, seconds, error}
+        self.agent_stats = {}
 
         # All findings returned by the agents
         self.findings = []
 
-    def select_agents(self):
+    def select_agents(self, requested=None):
         """
         Decide which security agents should run.
 
-        For the MVP, all three security agents are selected.
+        By default each agent decides from the project profile whether it
+        is relevant (e.g. SupabaseFirebaseBreaker only runs when Supabase
+        or Firebase is detected). `requested` forces a specific list.
         """
 
-        self.agents = [
-            "SecretBreaker",
-            "AuthBreaker",
-            "APIBreaker"
-        ]
+        self.agents = []
+        self.selection_reasons = {}
 
-        return self.agents
+        if requested:
 
-    def run_agents(self):
+            for name in requested:
+
+                agent = AGENTS_BY_NAME.get(name.strip().lower())
+
+                if agent is None:
+                    raise ValueError(
+                        f"Unknown agent '{name}'. "
+                        f"Available: {', '.join(a.name for a in AGENT_REGISTRY)}"
+                    )
+
+                if agent not in self.agents:
+                    self.agents.append(agent)
+                    self.selection_reasons[agent.name] = "requested"
+
+        else:
+
+            for agent in AGENT_REGISTRY:
+
+                reason = agent.selection_reason(self.project_profile)
+
+                if reason:
+                    self.agents.append(agent)
+                    self.selection_reasons[agent.name] = reason
+
+        return [agent.name for agent in self.agents]
+
+    def run_agents(self, progress=None):
         """
-        Run all selected security agents
-        and collect their findings.
+        Run all selected security agents and collect their findings.
+        One failing agent never stops the audit.
         """
 
         self.findings = []
 
-        # -------------------------
-        # SecretBreaker
-        # -------------------------
+        for agent in self.agents:
 
-        if "SecretBreaker" in self.agents:
+            if progress:
+                progress(agent.name)
 
-            breaker = SecretBreaker(
-                self.project_profile.project_path
-            )
+            started = time.perf_counter()
+            error = None
+            findings = []
 
-            findings = breaker.scan()
+            try:
+                breaker = agent(
+                    self.project_profile.project_path,
+                    files=self.project_profile.files,
+                    options=self.options,
+                )
 
-            self.findings.extend(findings)
+                findings = breaker.scan()
 
-        # -------------------------
-        # AuthBreaker
-        # -------------------------
+            except Exception as exception:  # noqa: BLE001 - keep other agents running
+                error = f"{type(exception).__name__}: {exception}"
 
-        if "AuthBreaker" in self.agents:
+                if self.options.get("debug"):
+                    traceback.print_exc()
 
-            breaker = AuthBreaker(
-                self.project_profile.project_path
-            )
-
-            findings = breaker.scan()
-
-            self.findings.extend(findings)
-
-        # -------------------------
-        # APIBreaker
-        # -------------------------
-
-        if "APIBreaker" in self.agents:
-
-            breaker = APIBreaker(
-                self.project_profile.project_path
-            )
-
-            findings = breaker.scan()
+            self.agent_stats[agent.name] = {
+                "findings": len(findings),
+                "seconds": round(time.perf_counter() - started, 2),
+                "error": error,
+            }
 
             self.findings.extend(findings)
+
+        self._downgrade_test_code(self.findings)
+        self.findings = self._filter(self._deduplicate(self.findings))
+        self.findings.sort(key=Finding.sort_key)
 
         return self.findings
 
+    @staticmethod
+    def _downgrade_test_code(findings):
+        """Halve confidence for findings in tests, fixtures and examples."""
+
+        for finding in findings:
+
+            if not TEST_PATH.search(finding.file):
+                continue
+
+            finding.confidence = round(finding.confidence * 0.5, 2)
+            finding.explanation += (
+                " (Found in test/fixture/example code: lower risk unless "
+                "this code ships to production.)"
+            )
+
+    @staticmethod
+    def _deduplicate(findings):
+
+        unique = {}
+
+        for finding in findings:
+            key = (finding.agent, finding.title, finding.file, finding.line)
+            unique.setdefault(key, finding)
+
+        return list(unique.values())
+
+    def _filter(self, findings):
+
+        min_severity = self.options.get("min_severity", "INFO")
+        min_confidence = self.options.get("min_confidence", 0.0)
+
+        return [
+            finding
+            for finding in findings
+            if severity_rank(finding.severity) <= severity_rank(min_severity)
+            and finding.confidence >= min_confidence
+        ]
+
     def correlate_findings(self):
         """
-        Group findings that point to the same
-        file and line.
+        Group findings that point to the same file and line.
 
+        Only locations flagged more than once are returned. Several
+        agents agreeing on one line is a strong signal it needs review.
         This does not merge or delete findings.
-        It only identifies findings that may
-        be related.
         """
 
         groups = {}
 
         for finding in self.findings:
+            groups.setdefault((finding.file, finding.line), []).append(finding)
 
-            key = (
-                finding.file,
-                finding.line
-            )
+        return [
+            group
+            for group in groups.values()
+            if len(group) > 1
+        ]
 
-            if key not in groups:
-                groups[key] = []
+    def risk_level(self):
+        """The most severe finding's severity, or NONE."""
 
-            groups[key].append(finding)
+        if not self.findings:
+            return "NONE"
 
-        return list(groups.values())
+        return min(
+            (finding.severity for finding in self.findings),
+            key=severity_rank,
+        )
+
+    def get_agent_summary(self):
+
+        return [
+            {
+                "name": agent.name,
+                "description": agent.description,
+                "reason": self.selection_reasons.get(agent.name),
+                "prompt_file": f"Prompts/{agent.prompt_file}" if agent.prompt_file else None,
+                **self.agent_stats.get(agent.name, {}),
+            }
+            for agent in self.agents
+        ]
+
+    def get_skipped_agents(self):
+
+        return [
+            agent.name
+            for agent in AGENT_REGISTRY
+            if agent not in self.agents
+        ]
 
     def get_project_summary(self):
-        """
-        Return a simple summary of the scanned project.
-        """
+        """Return a simple summary of the scanned project."""
 
         return {
             "project_path": self.project_profile.project_path,
             "project_types": self.project_profile.project_types,
             "technologies": self.project_profile.technologies,
-            "file_count": len(self.project_profile.files)
+            "file_count": len(self.project_profile.files),
         }
 
 
 if __name__ == "__main__":
 
+    import sys
+
     from Core.Scanner import ProjectScanner
 
-    # -------------------------
-    # Scan project
-    # -------------------------
-
-    scanner = ProjectScanner(".")
-
-    profile = scanner.create_profile()
-
-    # -------------------------
-    # Create Head Agent
-    # -------------------------
+    profile = ProjectScanner(sys.argv[1] if len(sys.argv) > 1 else ".").create_profile()
 
     head = HeadAgent(profile)
-
-    # -------------------------
-    # Select agents
-    # -------------------------
-
-    agents = head.select_agents()
-
-    # -------------------------
-    # Display project
-    # -------------------------
 
     print("\nBREAKR HEAD AGENT")
     print("=" * 40)
 
-    print("\nProject:")
-    print(profile.project_path)
-
-    print("\nTechnologies:")
-
-    if profile.technologies:
-
-        for technology in profile.technologies:
-            print(f"- {technology}")
-
-    else:
-
-        print("- None")
-
-    # -------------------------
-    # Display selected agents
-    # -------------------------
-
-    print("\nSelected Agents:")
-
-    for agent in agents:
-        print(f"- {agent}")
-
-    # -------------------------
-    # Run agents
-    # -------------------------
-
-    print("\nRunning selected agents...")
+    for name in head.select_agents():
+        print(f"- {name} ({head.selection_reasons[name]})")
 
     findings = head.run_agents()
 
-    # -------------------------
-    # Correlate findings
-    # -------------------------
+    print(f"\nTotal findings: {len(findings)}")
 
-    finding_groups = head.correlate_findings()
-
-    # -------------------------
-    # Generate report
-    # -------------------------
-
-    reporter = Reporter()
-
-    report_path = reporter.generate_json(
-        findings,
-        project_summary=head.get_project_summary(),
-        finding_groups=finding_groups
-    )
-
-    print(
-        f"\nSecurity report generated: "
-        f"{report_path}"
-    )
-
-    # -------------------------
-    # Display results
-    # -------------------------
-
-    print(
-        f"\nTotal findings: {len(findings)}"
-    )
-
-    if findings:
-
-        print("\nFindings:")
-        print("-" * 40)
-
-        for finding in findings:
-
-            print(
-                f"\n[{finding.severity}] "
-                f"{finding.title}"
-            )
-
-            print(
-                f"Agent: {finding.agent}"
-            )
-
-            print(
-                f"Location: "
-                f"{finding.file}:{finding.line}"
-            )
-
-            print(
-                f"Confidence: "
-                f"{finding.confidence}"
-            )
-
-            print(
-                f"Evidence: "
-                f"{finding.evidence}"
-            )
-
-        # -------------------------
-        # Display correlated groups
-        # -------------------------
-
-        print("\n")
-        print("CORRELATED FINDING GROUPS")
-        print("-" * 40)
-
-        for index, group in enumerate(
-            finding_groups,
-            start=1
-        ):
-
-            first_finding = group[0]
-
-            print(
-                f"\nGroup {index}: "
-                f"{first_finding.file}:"
-                f"{first_finding.line}"
-            )
-
-            for finding in group:
-
-                print(
-                    f"- {finding.agent}: "
-                    f"{finding.title}"
-                )
-
-    else:
-
-        print("\nNo findings detected.")
-
-        print(
-            "\nNo correlated finding groups."
-        )
+    for finding in findings:
+        print(f"[{finding.severity}] {finding.title} - {finding.file}:{finding.line}")

@@ -1,4 +1,26 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+
+
+# Most severe first. Used for sorting, filtering and exit codes.
+SEVERITY_ORDER = [
+    "CRITICAL",
+    "HIGH",
+    "MEDIUM",
+    "LOW",
+    "INFO",
+]
+
+
+def severity_rank(severity: str) -> int:
+    """
+    Lower number = more severe.
+    Unknown severities sort after INFO.
+    """
+
+    try:
+        return SEVERITY_ORDER.index(severity.upper())
+    except ValueError:
+        return len(SEVERITY_ORDER)
 
 
 @dataclass
@@ -12,16 +34,15 @@ class Finding:
     evidence: str
     explanation: str
     recommendation: str
+    cwe: str = ""
 
     def to_dict(self):
-        return {
-            "agent": self.agent,
-            "title": self.title,
-            "severity": self.severity,
-            "confidence": self.confidence,
-            "file": self.file,
-            "line": self.line,
-            "evidence": self.evidence,
-            "explanation": self.explanation,
-            "recommendation": self.recommendation,
-        }
+        return asdict(self)
+
+    def sort_key(self):
+        return (
+            severity_rank(self.severity),
+            -self.confidence,
+            self.file,
+            self.line,
+        )

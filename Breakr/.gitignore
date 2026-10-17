@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated reports (Reporter.py lives here and is tracked)
+Reports/security_report.json
+Reports/security_report.md
+
+# Local env files
+.env
+.env.*
+!.env.example

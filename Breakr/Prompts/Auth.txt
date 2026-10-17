@@ -1,0 +1,43 @@
+AGENT: AuthBreaker
+Detects: state-changing routes (POST/PUT/PATCH/DELETE, Next.js server actions,
+pages/api handlers) with no visible authentication; admin routes with no role
+check; webhooks with no signature verification; role checks done only in
+client components; auth tokens stored in localStorage.
+
+Breakr already looked for auth in three places: inside the handler, at file
+level (router.use(auth), APIRouter(dependencies=...), before_request) and in
+the file that mounts the router (app.use('/x', requireAuth, xRouter)). A
+finding means none of those showed protection, but auth can still live
+somewhere Breakr cannot see.
+
+HOW TO VERIFY
+1. Trace the request path end to end:
+   - Express: find where this router is mounted; check every app.use() before
+     it, including global middleware in server/app/index files.
+   - Next.js: check middleware.ts AND its `matcher`. Middleware-only auth was
+     bypassable (CVE-2025-29927 on next < 14.2.25 / 15.2.3) - the handler
+     should still verify the session itself. Server actions are public POST
+     endpoints: each one must check the user.
+   - Flask/FastAPI/Django: decorators, Depends(), blueprint before_request,
+     DRF permission_classes / DEFAULT_PERMISSION_CLASSES in settings.
+   - Supabase/Firebase backends: the "route" may be protected by RLS/rules
+     instead; check those.
+2. Is the route meant to be public? (signup, contact form, public search).
+   If yes: dismiss, but check it is rate limited and validates input.
+3. Admin routes: being logged in is not enough. Confirm a server-side role /
+   permission check, not just a hidden button in the UI.
+4. Webhooks: confirm the provider signature is verified (Stripe
+   constructEvent, GitHub X-Hub-Signature-256, Svix) BEFORE trusting the body,
+   using the raw request body and a constant-time compare.
+5. Client-side role checks and localStorage tokens are LOW on their own, but
+   become serious if the matching API route is also unprotected (check it) or
+   if XSS exists (token theft).
+
+FIX PATTERNS
+  Express:  router.post('/x', requireAuth, requireRole('admin'), handler)
+  Next.js:  const session = await auth(); if (!session) return new Response(null, { status: 401 })
+            if (session.user.role !== 'admin') return new Response(null, { status: 403 })
+  Server action: const user = await getUser(); if (!user) throw new Error('Unauthorized')
+  Flask:    @login_required plus a role decorator / abort(403)
+  FastAPI:  user = Depends(get_current_user); if not user.is_admin: raise HTTPException(403)
+Return 401 for "not logged in" and 403 for "logged in but not allowed".

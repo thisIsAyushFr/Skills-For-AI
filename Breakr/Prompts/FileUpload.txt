@@ -1,0 +1,41 @@
+AGENT: FileUploadBreaker
+Detects: request data used in file paths (readFile, sendFile, open,
+os.path.join, send_file, FileResponse), uploads saved under the client's
+filename (multer originalname, express-fileupload .mv, Flask/FastAPI
+.filename), multer / express-fileupload / Python uploads with no size limit
+or type validation, uploads served via express.static / StaticFiles, SVG
+uploads allowed, archive extraction without path checks (Zip Slip).
+Findings are downgraded when the file uses a path sanitiser.
+
+HOW TO VERIFY
+1. Path traversal
+   - Can the user control any part of the path? (query/body/params, stored
+     filename from an earlier upload, archive member names)
+   - Is the final path checked to stay inside the base directory AFTER
+     resolving? path.basename / secure_filename alone prevents ../ but check
+     absolute paths and symlinks too.
+   - Try mentally: ?name=../../.env or ?name=/etc/passwd. If either would be
+     read or written: HIGH/CRITICAL.
+2. Uploads
+   - Size: check for limits at every layer (framework config, reverse proxy
+     client_max_body_size, platform limits like Vercel 4.5 MB). If none:
+     MEDIUM (disk/memory exhaustion).
+   - Type: extension AND content (magic bytes) checks? Client-sent MIME type
+     alone is attacker-controlled.
+   - Storage: are uploads stored outside the web root / in a bucket? If they
+     are served from your domain, HTML/SVG uploads = stored XSS; .php/.jsp on
+     servers that execute them = RCE.
+3. Zip Slip: only relevant when the archive can come from a user.
+
+FIX PATTERNS
+  Serve a file:   const safe = path.basename(req.params.name);
+                  const full = path.resolve(BASE, safe);
+                  if (!full.startsWith(BASE + path.sep)) return res.sendStatus(400);
+  Flask:          return send_from_directory(UPLOAD_DIR, filename)
+  Save upload:    name = f"{uuid4().hex}{validated_extension}"
+  multer:         multer({ storage, limits: { fileSize: 5 * 1024 * 1024 },
+                           fileFilter: allowImagesOnly })
+  Flask config:   app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+  Serving:        separate domain / signed bucket URLs, or
+                  Content-Disposition: attachment + X-Content-Type-Options: nosniff
+  Archives:       tar.extractall(path, filter="data")  (Python 3.12+)

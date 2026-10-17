@@ -1,0 +1,38 @@
+AGENT: InjectionBreaker
+Detects: SQL built with f-strings / template literals / concatenation /
+.format(); Prisma $queryRawUnsafe; MongoDB queries built from req.body and
+$where; os.system / subprocess(shell=True) / child_process.exec with dynamic
+input; eval / exec / new Function; render_template_string (SSTI); pickle /
+yaml.load / node-serialize deserialization; XML parsers with entities enabled.
+
+HOW TO VERIFY
+The question is always: can attacker-controlled data reach this sink?
+1. Trace the interpolated variable backwards to its source:
+   request params/body/query/headers/cookies, uploaded files, webhook
+   payloads, database rows that users wrote, third-party APIs. Any of these
+   = attacker-controlled.
+2. Check for safe handling on the way:
+   - SQL: is the value cast to int, matched against an allowlist (e.g. sort
+     column), or passed as a bound parameter elsewhere? Identifiers (table /
+     column names) cannot be parameterised, so they need allowlists.
+   - Commands: is the input validated with a strict regex/allowlist? Is an
+     argument array used instead of a shell string?
+   - eval/exec on constants or developer-only config: dismiss or LOW.
+   - pickle/yaml loading only files the app itself created and users cannot
+     modify: LOW.
+3. Tagged templates (sql`...`, prisma.$queryRaw`...`) are parameterised and
+   SAFE. Breakr tries to skip them; dismiss if one slips through.
+4. NoSQL: User.findOne(req.body) lets an attacker send {"password": {"$ne":
+   null}} to bypass login: CONFIRMED if body is not type-checked.
+
+FIX PATTERNS
+  Python SQL:   cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+  SQLAlchemy:   text("... WHERE id = :id").bindparams(id=user_id)
+  Node pg:      db.query("SELECT * FROM users WHERE id = $1", [id])
+  Prisma:       prisma.$queryRaw`SELECT * FROM users WHERE id = ${id}`
+  Mongo:        User.findOne({ email: String(req.body.email) })
+  Commands:     subprocess.run(["ping", "-c", "1", host], check=True)
+                execFile("ping", ["-c", "1", host])
+  Templates:    render_template("page.html", name=name)
+  YAML:         yaml.safe_load(data)
+  Pickle:       use json for anything that crosses a trust boundary

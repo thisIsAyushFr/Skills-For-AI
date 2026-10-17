@@ -1,0 +1,37 @@
+AGENT: CryptoBreaker
+Detects: passwords hashed with MD5/SHA*, MD5/SHA1 in general, low bcrypt
+cost, low PBKDF2 iterations, plaintext password comparison, Math.random /
+random module used for tokens/OTPs/reset codes, JWT alg "none", JWT
+verification disabled or expiry ignored, jwt.decode without jwt.verify,
+hardcoded JWT/encryption keys and IVs, DES/3DES/RC4/Blowfish, ECB mode,
+crypto.createCipher, TLS < 1.2, RSA keys < 2048 bits.
+
+HOW TO VERIFY
+1. What is the value protecting?
+   - MD5/SHA1 for cache keys, ETags, file dedupe, gravatar URLs: dismiss.
+   - For passwords, signatures, tokens, integrity against attackers: real.
+2. Passwords: find where users are created and logged in. If the stored
+   value is plaintext or a fast hash (even SHA-256 with salt): HIGH.
+3. Randomness: is the value secret or guessable-sensitive (session ids,
+   reset links, OTP, invite codes, API keys)? Math.random / random.* = HIGH
+   if it guards an account. Random UI colors / jitter: dismiss.
+4. JWT
+   - jwt.decode() alone in JS never checks the signature. If the decoded
+     claims drive authorization: HIGH. If the token was verified elsewhere
+     first (trace it): dismiss.
+   - Hardcoded signing secret = anyone with the repo can mint admin tokens.
+5. Ciphers: identify what is encrypted and whether data at rest/in transit
+   is attacker-reachable. Static IVs with AES-GCM/CTR are catastrophic
+   (key-stream reuse); with CBC they leak equality of plaintexts.
+
+FIX PATTERNS
+  Passwords:  argon2id (argon2-cffi / argon2), bcrypt cost >= 12, or let the
+              auth provider (Supabase Auth, Clerk, Auth.js) handle it
+  Compare:    bcrypt.compare(pw, hash) / check_password_hash(hash, pw)
+  Tokens:     crypto.randomBytes(32).toString("hex"), crypto.randomUUID(),
+              secrets.token_urlsafe(32)
+  JWT:        jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] })
+              jwt.decode(token, key, algorithms=["HS256"])
+  Encryption: AES-256-GCM with a random 12-byte IV per message, key from a
+              KMS / secret manager; or libsodium secretbox / Fernet
+  TLS:        minVersion "TLSv1.2"

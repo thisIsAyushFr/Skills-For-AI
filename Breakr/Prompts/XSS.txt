@@ -1,0 +1,34 @@
+AGENT: XSSBreaker
+Detects: dangerouslySetInnerHTML, v-html, {@html}, Angular
+bypassSecurityTrust*, innerHTML/outerHTML/insertAdjacentHTML/document.write,
+jQuery .html(), URL data (location.hash/search) written to the DOM,
+request data echoed into HTML responses, Jinja/Django |safe, autoescape off,
+mark_safe/Markup on formatted strings, EJS <%- and Handlebars {{{ }}}.
+Findings are downgraded automatically when the file uses a sanitiser.
+
+HOW TO VERIFY
+1. Where does the HTML come from?
+   - Static strings or developer-authored markdown compiled at build time:
+     dismiss.
+   - Anything a user can influence (profile fields, comments, product
+     descriptions, CMS content editable by many people, URL params, API data
+     from another service): real.
+2. Is it sanitised right before rendering?
+   - DOMPurify.sanitize(html) / bleach.clean with an allowlist: OK.
+   - Escaping on input only, custom regex "sanitisers" that strip <script>:
+     NOT OK (onerror=, javascript:, SVG payloads bypass them).
+3. Is there a strict Content-Security-Policy (no 'unsafe-inline')? It reduces
+   impact but is not a fix.
+4. Impact multipliers: auth tokens in localStorage, admin users viewing the
+   content (stored XSS in an admin panel), same-origin access to APIs.
+5. Reflected XSS in server responses (res.send(`...${req.query.q}`)):
+   CONFIRMED unless the response Content-Type is not HTML.
+
+FIX PATTERNS
+  React:    render {text} as children; if HTML is required:
+            <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html) }} />
+  Vanilla:  el.textContent = value   (not innerHTML)
+  Vue:      {{ value }} instead of v-html, or sanitise first
+  Jinja:    remove |safe; escape with markupsafe.escape() if building HTML
+  Express:  render through a template engine with escaping, or escape-html
+  Headers:  add a CSP (helmet) and HttpOnly session cookies

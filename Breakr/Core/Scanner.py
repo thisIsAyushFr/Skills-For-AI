@@ -3,7 +3,7 @@ from pathlib import Path, PurePosixPath
 import json
 import re
 
-from Agents.base_breaker import walk_project, read_text_file
+from Agents.base_breaker import has_ignore_marker, walk_project, read_text_file
 from Models.ProjectProfile import ProjectProfile
 
 
@@ -75,9 +75,13 @@ MAX_PYTHON_FILES_FOR_IMPORTS = 400
 
 class ProjectScanner:
 
-    def __init__(self, project_path: str, excluded_paths=(), exclude_globs=()):
+    def __init__(self, project_path: str, excluded_paths=(), exclude_globs=(), include_ignored=False):
         self.project_path = Path(project_path).resolve()
         self.excluded_paths = excluded_paths
+
+        # Scan files marked "breakr: ignore-file" anyway (--include-ignored)
+        self.include_ignored = include_ignored
+        self.ignored_files = []
 
         # User --exclude patterns, e.g. "tests/*" or "legacy"
         self.exclude_globs = [
@@ -112,11 +116,26 @@ class ProjectScanner:
 
         self.validate_project()
 
-        return [
+        files = [
             file
             for file in walk_project(self.project_path, self.excluded_paths)
             if not self.is_excluded(file)
         ]
+
+        if self.include_ignored:
+            self.ignored_files = []
+            return files
+
+        # Files that opt out with a "breakr: ignore-file" comment.
+        self.ignored_files = [
+            file
+            for file in files
+            if has_ignore_marker(self.project_path / file)
+        ]
+
+        ignored = set(self.ignored_files)
+
+        return [file for file in files if file not in ignored]
 
     def detect_project_type(self, files):
         """Detect languages and frameworks from file names and extensions."""
@@ -272,6 +291,7 @@ class ProjectScanner:
             files=files,
             project_types=project_types,
             technologies=technologies,
+            ignored_files=list(self.ignored_files),
         )
 
 

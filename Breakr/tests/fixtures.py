@@ -1,9 +1,13 @@
+# breakr: ignore-file
+# This file is intentionally full of vulnerable code. The marker above keeps
+# it out of normal Breakr scans; use --include-ignored to scan it on purpose.
+
 """
 Throwaway projects for the test suite.
 
 They are written to a temp folder at test time, never committed, so
 the fake secrets below (built by string concatenation) can't trip
-GitHub secret scanning or show up when Breakr scans itself.
+GitHub secret scanning.
 """
 
 import base64

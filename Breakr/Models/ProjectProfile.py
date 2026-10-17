@@ -8,6 +8,9 @@ class ProjectProfile:
     project_types: list[str] = field(default_factory=list)
     technologies: list[str] = field(default_factory=list)
 
+    # Files skipped because they contain a "breakr: ignore-file" marker
+    ignored_files: list[str] = field(default_factory=list)
+
     def has_file(self, *names: str) -> bool:
         """True if any project file has one of these names (case-insensitive)."""
 
@@ -24,4 +27,5 @@ class ProjectProfile:
             "files": self.files,
             "project_types": self.project_types,
             "technologies": self.technologies,
+            "ignored_files": self.ignored_files,
         }

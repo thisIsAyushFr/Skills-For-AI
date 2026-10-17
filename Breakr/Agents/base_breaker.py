@@ -347,6 +347,31 @@ def read_text_file(path: Path):
     return data.decode("utf-8", errors="ignore")
 
 
+IGNORE_MARKER_WINDOW = 2048
+
+# The marker must be the whole comment line, e.g. "# breakr: ignore-file",
+# so code or docs that merely mention it are not skipped.
+IGNORE_FILE_MARKER = re.compile(
+    rb"^[ \t]*(?:#|//|/\*|<!--|--|;)[ \t]*breakr:[ \t]*ignore-file[ \t]*(?:\*/|-->)?[ \t]*\r?$",
+    re.MULTILINE,
+)
+
+
+def has_ignore_marker(path: Path) -> bool:
+    """
+    True if the file opts out of scanning with a 'breakr: ignore-file'
+    comment line near the top (for intentionally vulnerable fixtures).
+    """
+
+    try:
+        with open(path, "rb") as file:
+            head = file.read(IGNORE_MARKER_WINDOW)
+    except OSError:
+        return False
+
+    return bool(IGNORE_FILE_MARKER.search(head))
+
+
 MINIFIABLE_EXTENSIONS = {".js", ".mjs", ".cjs", ".css"}
 
 

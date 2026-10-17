@@ -211,6 +211,7 @@ class HeadAgent:
             "project_types": self.project_profile.project_types,
             "technologies": self.project_profile.technologies,
             "file_count": len(self.project_profile.files),
+            "ignored_files": self.project_profile.ignored_files,
         }
 
 

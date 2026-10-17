@@ -4,6 +4,8 @@ Run from the Breakr folder:
     python -m unittest discover -s tests -t . -v
 """
 
+import contextlib
+import io
 import json
 import shutil
 import tempfile
@@ -382,6 +384,195 @@ class HelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Reporter(directory).generate_markdown([], project_summary={})
             self.assertIn("No potential security issues", path.read_text(encoding="utf-8"))
+
+
+BREAKR_ROOT = Path(main.__file__).resolve().parent
+
+
+def run_cli(*args):
+    """Run the CLI quietly; return (exit code, captured stdout + stderr)."""
+
+    output = io.StringIO()
+
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        try:
+            code = main.main(list(args))
+        except SystemExit as exit:
+            code = exit.code
+
+    return code, output.getvalue()
+
+
+class IgnoreMarkerTests(unittest.TestCase):
+
+    def test_self_audit_is_clean_but_fixtures_can_be_scanned(self):
+        with tempfile.TemporaryDirectory() as output:
+
+            # Default: the vulnerable fixture file is skipped, nothing else fires.
+            code, _ = run_cli(str(BREAKR_ROOT), "--output-dir", output, "--quiet", "--no-color")
+            report = json.loads((Path(output) / "security_report.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(code, main.EXIT_OK)
+            self.assertEqual(report["project"]["ignored_files"], ["tests/fixtures.py"])
+            self.assertEqual(
+                [],
+                [f"{f['agent']}: {f['title']} @ {f['file']}:{f['line']}" for f in report["findings"]],
+            )
+
+            # Explicitly opting in scans the fixtures again.
+            run_cli(str(BREAKR_ROOT), "--output-dir", output, "--quiet", "--no-color", "--include-ignored")
+            report = json.loads((Path(output) / "security_report.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(report["project"]["ignored_files"], [])
+            self.assertTrue(any(f["file"] == "tests/fixtures.py" for f in report["findings"]))
+
+    def test_marker_must_be_a_whole_comment_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_project(root, {
+                "fixture.js": "// breakr: ignore-file\neval(userInput);\n",
+                "fixture.py": "# breakr: ignore-file\neval(user_input)\n",
+                "mentions.py": '# Files with a "breakr: ignore-file" marker are skipped\neval(user_input)\n',
+            })
+
+            scanner = ProjectScanner(str(root))
+            profile = scanner.create_profile()
+
+            self.assertEqual(sorted(profile.ignored_files), ["fixture.js", "fixture.py"])
+            self.assertEqual(profile.files, ["mentions.py"])
+
+            self.assertEqual(
+                len(ProjectScanner(str(root), include_ignored=True).create_profile().files),
+                3,
+            )
+
+
+class CLITests(ProjectTestCase):
+    """End-to-end CLI behaviour, including error handling."""
+
+    files = VULNERABLE_PROJECT
+
+    def setUp(self):
+        self.output = Path(tempfile.mkdtemp(prefix="breakr-out-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.output, ignore_errors=True)
+
+    def cli(self, *args):
+        return run_cli(*args, "--output-dir", str(self.output), "--quiet", "--no-color")
+
+    def test_missing_project_is_an_error(self):
+        code, output = self.cli(str(self.root / "does-not-exist"))
+        self.assertEqual(code, main.EXIT_ERROR)
+        self.assertIn("does not exist", output)
+
+    def test_file_instead_of_directory_is_an_error(self):
+        code, output = self.cli(str(self.root / "server.js"))
+        self.assertEqual(code, main.EXIT_ERROR)
+        self.assertIn("must be a directory", output)
+
+    def test_unknown_agent_is_an_error(self):
+        code, output = self.cli(str(self.root), "--agents", "NopeBreaker")
+        self.assertEqual(code, main.EXIT_ERROR)
+        self.assertIn("Unknown agent", output)
+
+    def test_bad_arguments_exit_1_not_2(self):
+        # 2 is reserved for --fail-on, so CI can tell the two apart.
+        self.assertEqual(run_cli()[0], main.EXIT_ERROR)
+        self.assertEqual(run_cli(str(self.root), "--min-severity", "SEVERE")[0], main.EXIT_ERROR)
+
+    def test_unwritable_output_directory_is_an_error(self):
+        blocker = self.output / "not-a-directory"
+        blocker.write_text("x", encoding="utf-8")
+
+        code, output = run_cli(str(self.root), "--output-dir", str(blocker), "--quiet", "--no-color")
+
+        self.assertEqual(code, main.EXIT_ERROR)
+        self.assertIn("could not write reports", output)
+
+    def test_list_agents_and_version(self):
+        code, output = run_cli("--list-agents", "--no-color")
+        self.assertEqual(code, main.EXIT_OK)
+        for agent in AGENT_REGISTRY:
+            self.assertIn(agent.name, output)
+
+        code, output = run_cli("--version")
+        self.assertEqual(code, 0)
+        self.assertIn(main.BREAKR_VERSION, output)
+
+    def test_json_only_format_and_agent_selection(self):
+        code, _ = self.cli(str(self.root), "--format", "json", "--agents", "SecretBreaker,XSSBreaker")
+
+        self.assertEqual(code, main.EXIT_OK)
+        self.assertTrue((self.output / "security_report.json").exists())
+        self.assertFalse((self.output / "security_report.md").exists())
+
+        report = json.loads((self.output / "security_report.json").read_text(encoding="utf-8"))
+        self.assertEqual([a["name"] for a in report["agents"]], ["SecretBreaker", "XSSBreaker"])
+        self.assertTrue({f["agent"] for f in report["findings"]} <= {"SecretBreaker", "XSSBreaker"})
+
+    def test_exclude_removes_files_from_the_scan(self):
+        self.cli(str(self.root), "--exclude", "app.py", "--exclude", "supabase")
+        report = json.loads((self.output / "security_report.json").read_text(encoding="utf-8"))
+        files = {f["file"] for f in report["findings"]}
+
+        self.assertNotIn("app.py", files)
+        self.assertFalse(any(file.startswith("supabase/") for file in files))
+
+    def test_safe_project_passes_fail_on(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_project(Path(directory), SAFE_PROJECT)
+            code, _ = self.cli(directory, "--fail-on", "LOW")
+
+        self.assertEqual(code, main.EXIT_OK)
+        report = json.loads((self.output / "security_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["summary"]["risk_level"], "NONE")
+
+    def test_crashing_agent_does_not_stop_the_audit(self):
+
+        class CrashingBreaker(SecretBreaker):
+            name = "CrashingBreaker"
+
+            def scan(self):
+                raise RuntimeError("boom")
+
+        head = HeadAgent(self.profile)
+        head.select_agents(["SecretBreaker"])
+        head.agents.insert(0, CrashingBreaker)
+
+        findings = head.run_agents()
+
+        self.assertEqual(head.agent_stats["CrashingBreaker"]["error"], "RuntimeError: boom")
+        self.assertIsNone(head.agent_stats["SecretBreaker"]["error"])
+        self.assertTrue(any(f.agent == "SecretBreaker" for f in findings))
+
+
+class SkillFilesTests(unittest.TestCase):
+    """The AI half of the skill: SKILL.md and the triage prompts it points to."""
+
+    def test_skill_frontmatter(self):
+        text = (BREAKR_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+
+        frontmatter = text.split("---\n")[1]
+        fields = dict(
+            line.split(":", 1)
+            for line in frontmatter.strip().splitlines()
+        )
+
+        self.assertEqual(fields["name"].strip(), "breakr")
+        self.assertGreater(len(fields["description"].strip()), 50)
+
+    def test_every_agent_has_a_triage_prompt(self):
+        skill = (BREAKR_ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        for agent in AGENT_REGISTRY:
+            prompt = BREAKR_ROOT / "Prompts" / agent.prompt_file
+            self.assertTrue(prompt.is_file(), f"{agent.name}: missing {prompt}")
+            self.assertGreater(len(prompt.read_text(encoding="utf-8").strip()), 200)
+            self.assertIn(f"Prompts/{agent.prompt_file}", skill)
+
+        self.assertTrue((BREAKR_ROOT / "Prompts" / "Head.txt").is_file())
 
 
 if __name__ == "__main__":

@@ -46,9 +46,17 @@ class Output:
         return self.paint(f"[{severity}]", severity)
 
 
+class BreakrArgumentParser(argparse.ArgumentParser):
+    """Exit with EXIT_ERROR on bad arguments so 2 always means --fail-on."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_ERROR, f"{self.prog}: error: {message}\n")
+
+
 def parse_arguments(argv=None):
 
-    parser = argparse.ArgumentParser(
+    parser = BreakrArgumentParser(
         prog="breakr",
         description=(
             "Breakr: a multi-agent static security auditor. Scans a project "
@@ -74,6 +82,12 @@ def parse_arguments(argv=None):
         default=[],
         metavar="PATTERN",
         help="Skip files/folders matching this glob (repeatable), e.g. --exclude tests --exclude 'legacy/*'",
+    )
+    parser.add_argument(
+        "--include-ignored",
+        action="store_true",
+        help="Also scan files marked with a 'breakr: ignore-file' comment "
+             "(e.g. intentionally vulnerable test fixtures)",
     )
     parser.add_argument(
         "--list-agents",
@@ -214,6 +228,7 @@ def run_audit(arguments):
             output_directory / "security_report.md",
         ],
         exclude_globs=arguments.exclude,
+        include_ignored=arguments.include_ignored,
     )
 
     profile = scanner.create_profile()
@@ -245,6 +260,13 @@ def run_audit(arguments):
         return EXIT_ERROR
 
     print(f"\nFiles: {len(profile.files)}")
+
+    if profile.ignored_files:
+        print(out.paint(
+            f"  Skipped {len(profile.ignored_files)} file(s) marked 'breakr: ignore-file' "
+            "(use --include-ignored to scan them)",
+            "dim",
+        ))
 
     print("\nTechnologies:")
     print("- " + (", ".join(profile.technologies) or "None detected"))
@@ -279,8 +301,6 @@ def run_audit(arguments):
     # Generate reports
     # -------------------------
 
-    reporter = Reporter(output_directory)
-
     report_data = dict(
         project_summary=head.get_project_summary(),
         finding_groups=finding_groups,
@@ -291,11 +311,18 @@ def run_audit(arguments):
 
     report_paths = []
 
-    if arguments.format in {"json", "both"}:
-        report_paths.append(reporter.generate_json(findings, **report_data))
+    try:
+        reporter = Reporter(output_directory)
 
-    if arguments.format in {"markdown", "both"}:
-        report_paths.append(reporter.generate_markdown(findings, **report_data))
+        if arguments.format in {"json", "both"}:
+            report_paths.append(reporter.generate_json(findings, **report_data))
+
+        if arguments.format in {"markdown", "both"}:
+            report_paths.append(reporter.generate_markdown(findings, **report_data))
+
+    except OSError as error:
+        print(f"\nError: could not write reports to {output_directory}: {error}")
+        return EXIT_ERROR
 
     # -------------------------
     # Findings

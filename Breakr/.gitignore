@@ -10,3 +10,10 @@ Reports/security_report.md
 .env
 .env.*
 !.env.example
+
+# Local tool / editor configuration
+.claude/settings.local.json
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

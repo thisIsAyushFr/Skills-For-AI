@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Breakr reports (generated on every run)
+security_report.json
+security_report.md
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Local tool / editor configuration
+.claude/settings.local.json
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
